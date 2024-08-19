@@ -1,0 +1,2151 @@
+diff --git a/arch/riscv/core/prep_c.c b/arch/riscv/core/prep_c.c
+index b0fdd3a056..f0a56bf1d7 100644
+--- a/arch/riscv/core/prep_c.c
++++ b/arch/riscv/core/prep_c.c
+@@ -30,7 +30,7 @@ void soc_interrupt_init(void);
+  *
+  * This routine prepares for the execution of and runs C code.
+  */
+-
++extern uint64_t g_mtvec_tmp;
+ void z_prep_c(void)
+ {
+ 	z_bss_zero();
+diff --git a/arch/riscv/core/reset.S b/arch/riscv/core/reset.S
+index 89c488faa9..1c72d2dac2 100644
+--- a/arch/riscv/core/reset.S
++++ b/arch/riscv/core/reset.S
+@@ -20,7 +20,8 @@ GTEXT(z_prep_c)
+ GTEXT(riscv_cpu_wake_flag)
+ GTEXT(riscv_cpu_sp)
+ GTEXT(arch_secondary_cpu_init)
+-
++.extern g_ped_ops
++.extern g_mtvec_tmp
+ #if CONFIG_INCLUDE_RESET_VECTOR
+ SECTION_FUNC(reset, __reset)
+ 	/*
+@@ -38,6 +39,8 @@ SECTION_FUNC(reset, __reset)
+  * the C domain
+  */
+ SECTION_FUNC(TEXT, __initialize)
++	la a1, g_ped_ops
++	sd a0, 0(a1)
+ 	csrr a0, mhartid
+ 	li t0, CONFIG_RV_BOOT_HART
+ 	beq a0, t0, boot_first_core
+@@ -80,7 +83,7 @@ aa_loop:
+ 	la sp, z_interrupt_stacks
+ 	li t0, __z_interrupt_stack_SIZEOF
+ 	add sp, sp, t0
+-
++	
+ #ifdef CONFIG_WDOG_INIT
+ 	call _WdogInit
+ #endif
+@@ -90,7 +93,6 @@ aa_loop:
+ 	 * and then enters kernel z_cstart
+ 	 */
+ 	call z_prep_c
+-
+ boot_secondary_core:
+ #if CONFIG_MP_MAX_NUM_CPUS > 1
+ 	la t0, riscv_cpu_wake_flag
+diff --git a/boards/milkv/duo/milkv_duo-pinctrl.dtsi b/boards/milkv/duo/milkv_duo-pinctrl.dtsi
+index 20974fa7cc..75fbb5aba6 100644
+--- a/boards/milkv/duo/milkv_duo-pinctrl.dtsi
++++ b/boards/milkv/duo/milkv_duo-pinctrl.dtsi
+@@ -6,8 +6,8 @@
+ &pinctrl {
+ 	uart1_default: uart1_default {
+ 		group1 {
+-			pinmux = <CVI_PINMUX(IIC0_SCL, UART1_TX)>,  /* GP0 */
+-				 <CVI_PINMUX(IIC0_SDA, UART1_RX)>;  /* GP1 */
++			pinmux = <CVI_PINMUX(IIC0_SCL, UART1_TX)>,  /* GP19 */
++				 <CVI_PINMUX(IIC0_SDA, UART1_RX)>;  /* GP18 */
+ 		};
+ 	};
+ };
+diff --git a/boards/milkv/duo/milkv_duo.dts b/boards/milkv/duo/milkv_duo.dts
+index 27c6bc7059..5b14ce198e 100644
+--- a/boards/milkv/duo/milkv_duo.dts
++++ b/boards/milkv/duo/milkv_duo.dts
+@@ -41,9 +41,13 @@
+ 		 *
+ 		 * see: https://github.com/milkv-duo/duo-buildroot-sdk
+ 		 */
+-		sram: memory@83f40000 {
++		sram: memory@83000000 {
+ 			compatible = "mmio-sram";
+-			reg = <0x83f40000 DT_SIZE_K(768)>;
++			reg = <0x83000000 DT_SIZE_M(1)>;
++		};
++		client_os_dma_memory_region: client_os-dma-memory@83100000 {
++			compatible = "shared-dma-pool";
++			reg = <0x83100000 DT_SIZE_M(1)>;
+ 		};
+ 	};
+ };
+diff --git a/kernel/init.c b/kernel/init.c
+index 998cb938f1..7d40b3b012 100644
+--- a/kernel/init.c
++++ b/kernel/init.c
+@@ -219,6 +219,7 @@ void __weak z_early_memcpy(void *dst, const void *src, size_t n)
+ __boot_func
+ void z_bss_zero(void)
+ {
++	return;
+ 	if (IS_ENABLED(CONFIG_SKIP_BSS_CLEAR)) {
+ 		return;
+ 	}
+diff --git a/samples/basic/blinky/src/main.c b/samples/basic/blinky/src/main.c
+index 4cab4969d9..18d3384664 100644
+--- a/samples/basic/blinky/src/main.c
++++ b/samples/basic/blinky/src/main.c
+@@ -7,7 +7,6 @@
+ #include <stdio.h>
+ #include <zephyr/kernel.h>
+ #include <zephyr/drivers/gpio.h>
+-
+ /* 1000 msec = 1 sec */
+ #define SLEEP_TIME_MS   1000
+ 
+diff --git a/samples/mica/CMakeLists.txt b/samples/mica/CMakeLists.txt
+new file mode 100644
+index 0000000000..e98d3a6de0
+--- /dev/null
++++ b/samples/mica/CMakeLists.txt
+@@ -0,0 +1,12 @@
++# SPDX-License-Identifier: Apache-2.0
++
++cmake_minimum_required(VERSION 3.20.0)
++
++find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
++project(mica)
++
++set(THREAD_LOCAL_STORAGE 0)
++FILE(GLOB app_sources src/*.c)
++target_sources(app PRIVATE ${app_sources})
++target_include_directories(app PRIVATE src/include)
++zephyr_linker_sources(SECTIONS resource_table.ld)
+diff --git a/samples/mica/README.rst b/samples/mica/README.rst
+new file mode 100644
+index 0000000000..ce5423d6f0
+--- /dev/null
++++ b/samples/mica/README.rst
+@@ -0,0 +1,33 @@
++.. _hello_world:
++
++Hello World
++###########
++
++Overview
++********
++
++A simple sample that can be used with any :ref:`supported board <boards>` and
++prints "Hello World" to the console.
++
++Building and Running
++********************
++
++This application can be built and executed on QEMU as follows:
++
++.. zephyr-app-commands::
++   :zephyr-app: samples/hello_world
++   :host-os: unix
++   :board: qemu_x86
++   :goals: run
++   :compact:
++
++To build for another board, change "qemu_x86" above to that board's name.
++
++Sample Output
++=============
++
++.. code-block:: console
++
++    Hello World! x86
++
++Exit QEMU by pressing :kbd:`CTRL+A` :kbd:`x`.
+diff --git a/samples/mica/prj.conf b/samples/mica/prj.conf
+new file mode 100644
+index 0000000000..3e7b42bfb1
+--- /dev/null
++++ b/samples/mica/prj.conf
+@@ -0,0 +1,7 @@
++CONFIG_LIBMETAL=y
++CONFIG_LIBMETAL_SRC_PATH="libmetal"
++CONFIG_OPENAMP=y
++CONFIG_OPENAMP_SRC_PATH="open-amp"
++CONFIG_OPENAMP_MASTER=y
++CONFIG_OPENAMP_SLAVE=y
++CONFIG_HEAP_MEM_POOL_SIZE=655360
+diff --git a/samples/mica/resource_table.ld b/samples/mica/resource_table.ld
+new file mode 100644
+index 0000000000..f51ee0afe8
+--- /dev/null
++++ b/samples/mica/resource_table.ld
+@@ -0,0 +1,7 @@
++ SECTION_PROLOGUE(.resource_table,, SUBALIGN(4))
++        {
++          _resource_table_start = .;
++          KEEP(*(.resource_table*))
++          _resource_table_end = .;
++        } GROUP_LINK_IN(ROMABLE_REGION)
++        _resource_tables_size = _resource_table_end - _resource_table_start;
+diff --git a/samples/mica/sample.yaml b/samples/mica/sample.yaml
+new file mode 100644
+index 0000000000..1bcb7db62f
+--- /dev/null
++++ b/samples/mica/sample.yaml
+@@ -0,0 +1,16 @@
++sample:
++  description: Hello World sample, the simplest Zephyr
++    application
++  name: hello world
++common:
++  tags: introduction
++  integration_platforms:
++    - native_sim
++  harness: console
++  harness_config:
++    type: one_line
++    regex:
++      - "Hello World! (.*)"
++tests:
++  sample.basic.helloworld:
++    tags: introduction
+diff --git a/samples/mica/src/CMakeLists.txt b/samples/mica/src/CMakeLists.txt
+new file mode 100644
+index 0000000000..9c9bd8b319
+--- /dev/null
++++ b/samples/mica/src/CMakeLists.txt
+@@ -0,0 +1,2 @@
++target_sources(app PRIVATE ${SRC_FILE})
++FILE(GLOB app_sources src/*.c)
+diff --git a/samples/mica/src/cvi_spinlock.c b/samples/mica/src/cvi_spinlock.c
+new file mode 100644
+index 0000000000..d94c07f5b4
+--- /dev/null
++++ b/samples/mica/src/cvi_spinlock.c
+@@ -0,0 +1,102 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Copyright (C) Cvitek Co., Ltd. 2019-2022. All rights reserved.
++ *
++ * File Name: cvi_spinlock.c
++ * Description:
++ */
++
++#include <stdint.h>
++#include <zephyr/kernel.h>
++#include <zephyr/types.h>
++#include <zephyr/irq.h>
++#include "cvi_spinlock.h"
++#include "uart_printf.h"
++#define SPINLOCK_REG_BASE  (0x01900000ull + 0x00c0)
++static uint64_t reg_base = SPINLOCK_REG_BASE;
++static uint8_t lockCount[SPIN_MAX+1] = {0};
++
++void cvi_spinlock_init()
++{
++    return;
++}
++
++void cvi_spinlock_deinit(void)
++{
++    return;
++}
++
++void spinlock_base(uint64_t mb_base)
++{
++	reg_base = mb_base;
++}
++
++static int hw_spin_trylock(hw_raw_spinlock_t *lock)
++{
++    sys_write32(lock->locks, reg_base + sizeof(int) * lock->hw_field);
++    if (sys_read32(reg_base + sizeof(int) * lock->hw_field) == lock->locks)
++        return MAILBOX_LOCK_SUCCESS;
++    return MAILBOX_LOCK_FAILED;
++}
++
++int hw_spin_lock(hw_raw_spinlock_t *lock)
++{
++    uint64_t i;
++    uint64_t loops = 1000000;
++    hw_raw_spinlock_t _lock = {.hw_field = lock->hw_field, .locks = lock->locks};
++    if (lock->hw_field >= SPIN_LINUX_RTOS)
++    {
++        if (lockCount[lock->hw_field] == 0) 
++        {
++            lockCount[lock->hw_field]++;
++        }
++        _lock.locks = (lockCount[lock->hw_field] << 8);
++        lockCount[lock->hw_field]++;
++    }
++    else 
++    {
++        uint64_t systime = k_cycle_get_64();
++        /* lock ID can not be 0, so set it to 1 at least */
++        if ((systime & 0xFFFF) == 0)
++            systime = 1;
++        lock->locks = (uint16_t) (systime & 0xFFFF);
++    }
++    for (i = 0; i < loops; i++) 
++    {
++        if (hw_spin_trylock(&_lock) == MAILBOX_LOCK_SUCCESS)
++        {
++            lock->locks = _lock.locks;
++            return MAILBOX_LOCK_SUCCESS;
++        }
++	    k_usleep(1);
++    }
++    return MAILBOX_LOCK_FAILED;
++}
++
++int _hw_raw_spin_lock_irqsave(hw_raw_spinlock_t *lock)
++{
++	int flag = irq_lock();
++	// lock
++	if (hw_spin_lock(lock) == MAILBOX_LOCK_FAILED) 
++    {
++        irq_unlock(flag);
++        uart_printf("spin lock fail! reg_val=0x%x, lock->locks=0x%x\n", sys_read32(reg_base + sizeof(int) * lock->hw_field), lock->locks);
++        return MAILBOX_LOCK_FAILED;
++    }
++    return flag;
++}
++
++void _hw_raw_spin_unlock_irqrestore(hw_raw_spinlock_t *lock, int flag)
++{
++	// unlock
++	if (sys_read32(reg_base + sizeof(int) * lock->hw_field) == lock->locks) 
++    {
++        (lock->locks, reg_base + sizeof(int) * lock->hw_field);
++        // restore irq
++        irq_unlock(flag);
++    } 
++    else 
++    {
++
++    }
++}
+diff --git a/samples/mica/src/hal_uart.c b/samples/mica/src/hal_uart.c
+new file mode 100644
+index 0000000000..821770ea88
+--- /dev/null
++++ b/samples/mica/src/hal_uart.c
+@@ -0,0 +1,130 @@
++#include <stdint.h>
++#include "hal_uart.h"
++
++#ifndef __CV180X_REG_H
++#define __CV180X_REG_H
++
++#define SEC_BASE                                0x02000000
++#define TOP_BASE                                0x03000000
++// #define PINMUX_BASE                             (TOP_BASE + 0x00001000)
++#define CLKGEN_BASE                             (TOP_BASE + 0x00002000)
++#define WDT_BASE                                (TOP_BASE + 0x00011000)
++#define TEMPSEN_BASE                            (TOP_BASE + 0x000E0000)
++
++#define UART0_BASE                              0x04140000
++#define UART1_BASE                              0x04150000
++#define UART2_BASE                              0x04160000
++#define UART3_BASE                              0x04170000
++#define SRAM_BASE                               0x0E000000
++
++#define MAILBOX_REG_BASE                        0x01900000
++#define MAILBOX_REG_BUFF                        (MAILBOX_REG_BASE + 0x0400)
++#define SPINLOCK_REG_BASE                       (MAILBOX_REG_BASE + 0x00c0)
++
++#define I2C0                    0x0
++#define I2C1                    0x1
++#define I2C2                    0x2
++#define I2C3                    0x3
++#define I2C4                    0x4
++
++/* I2C */
++#define I2C0_BASE                               0x4000000
++#define I2C1_BASE                               0x4010000
++#define I2C2_BASE                               0x4020000
++#define I2C3_BASE                               0x4030000
++#define I2C4_BASE                               0x4040000
++
++/* Clock */
++#define REG_CLK_ENABLE_REG0                     (CLKGEN_BASE)
++#define REG_CLK_ENABLE_REG1                     (CLKGEN_BASE + 0x4)
++#define REG_CLK_ENABLE_REG2                     (CLKGEN_BASE + 0x8)
++#define REG_CLK_BYPASS_SEL_REG                  (CLKGEN_BASE + 0x30)
++#define REG_CLK_BYPASS_SEL_REG2                 (CLKGEN_BASE + 0x34)
++#define REG_CLK_DIV0_CTL_CA53_REG               (CLKGEN_BASE + 0x40)
++#define REG_CLK_DIV0_CTL_CPU_AXI0_REG           (CLKGEN_BASE + 0x48)
++#define REG_CLK_DIV0_CTL_TPU_AXI_REG            (CLKGEN_BASE + 0x54)
++#define REG_CLK_DIV0_CTL_TPU_FAB_REG            (CLKGEN_BASE + 0x5C)
++
++/* USB */
++#define TOP_USB_PHY_CTRSTS_REG                  (TOP_BASE + 0x48)
++#define UPCR_EXTERNAL_VBUS_VALID_OFFSET         0
++
++/* DRAM */
++#define TOP_DDR_ADDR_MODE_REG                   (TOP_BASE + 0x64)
++#define DAMR_REG_USB_REMAP_ADDR_39_32_OFFSET    16
++#define DAMR_REG_USB_REMAP_ADDR_39_32_MSK       (0xff)
++
++#define DAMR_REG_VD_REMAP_ADDR_39_32_OFFSET     24
++#define DAMR_REG_VD_REMAP_ADDR_39_32_MSK        (0xff)
++
++#define SW_RESET  (TOP_BASE + 0x3000)
++#define JPEG_RESET   4
++
++#define JPU_BASE                                0x0B000000
++
++/* rst */
++#define REG_TOP_SOFT_RST                        0x3000
++
++/* addr remap */
++#define REG_TOP_ADDR_REMAP                      0x0064
++#define ADDR_REMAP_USB(a)                       ((a & 0xFF) << 16)
++
++/* ethernet phy */
++
++/* watchdog */
++
++#endif /* __CV180X_REG_H */
++
++struct dw_regs *uart = 0;
++
++void hal_uart_init(device_uart dev_uart, int baudrate, int uart_clock)
++{
++        //int divisor = uart_clock / (16 * baudrate);
++        switch (dev_uart) {
++                case UART0:
++                        uart = (struct dw_regs *)UART0_BASE;
++                        break;
++                case UART1:
++                        uart = (struct dw_regs *)UART1_BASE;
++                        break;
++                case UART2:
++                        uart = (struct dw_regs *)UART2_BASE;
++                        break;
++                case UART3:
++                        uart = (struct dw_regs *)UART3_BASE;
++                        break;
++                default:
++                        break;
++        }
++	/*
++        uart->lcr = uart->lcr | UART_LCR_DLAB | UART_LCR_8N1;
++        uart->dll = divisor & 0xff;
++        uart->dlm = (divisor >> 8) & 0xff;
++        uart->lcr = uart->lcr & (~UART_LCR_DLAB);
++
++        uart->ier = 0;
++        uart->mcr = UART_MCRVAL;
++        uart->fcr = UART_FCR_DEFVAL;
++
++        uart->lcr = 3;
++	*/
++}
++
++void hal_uart_putc(uint8_t ch)
++{
++        while (!(uart->lsr & UART_LSR_THRE))
++                ;
++        uart->rbr = ch;
++}
++
++int hal_uart_getc(void)
++{
++        while (!(uart->lsr & UART_LSR_DR))
++                return (int)uart->rbr;
++}
++
++int hal_uart_tstc(void)
++{
++        return (!!(uart->lsr & UART_LSR_DR));
++}
++
+diff --git a/samples/mica/src/include/cvi_spinlock.h b/samples/mica/src/include/cvi_spinlock.h
+new file mode 100644
+index 0000000000..98dd1afd34
+--- /dev/null
++++ b/samples/mica/src/include/cvi_spinlock.h
+@@ -0,0 +1,45 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++
++#ifndef __DRV_SPINLOCK_H__
++#define __DRV_SPINLOCK_H__
++
++enum SPINLOCK_FIELD {
++	SPIN_UART,
++	SPIN_LINUX_RTOS = 4, // this spinlock field is used for linux & rtos
++	SPIN_MBOX = SPIN_LINUX_RTOS,
++	SPIN_MAX = 7,
++};
++
++typedef struct hw_raw_spinlock {
++	unsigned short locks;
++	unsigned short hw_field;
++} hw_raw_spinlock_t;
++
++#define MAILBOX_LOCK_SUCCESS	1
++#define MAILBOX_LOCK_FAILED		(-1)
++
++#define __CVI_ARCH_SPIN_LOCK_UNLOCKED    { 0 }
++
++#define __CVI_RAW_SPIN_LOCK_INITIALIZER(spinlock_hw_field)   \
++	{                   \
++		.locks = __CVI_ARCH_SPIN_LOCK_UNLOCKED,  \
++		.hw_field = spinlock_hw_field, \
++	}
++
++#define DEFINE_CVI_SPINLOCK(x, y)  hw_raw_spinlock_t x = __CVI_RAW_SPIN_LOCK_INITIALIZER(y)
++
++int _hw_raw_spin_lock_irqsave(hw_raw_spinlock_t *lock);
++void _hw_raw_spin_unlock_irqrestore(hw_raw_spinlock_t *lock, int flag);
++
++#define drv_spin_lock_irqsave(lock, flags)              \
++	{	flags = _hw_raw_spin_lock_irqsave(lock);  }
++
++#define drv_spin_unlock_irqrestore(lock, flags)     \
++	_hw_raw_spin_unlock_irqrestore(lock, flags)
++
++void spinlock_base(uint64_t mb_base);
++void cvi_spinlock_init(void);
++
++#endif // end of __DRV_SPINLOCK_H__
++
++
+diff --git a/samples/mica/src/include/hal_uart.h b/samples/mica/src/include/hal_uart.h
+new file mode 100644
+index 0000000000..25ff1f2604
+--- /dev/null
++++ b/samples/mica/src/include/hal_uart.h
+@@ -0,0 +1,63 @@
++#ifndef __HAL_UART_DW_HEADER__
++#define __HAL_UART_DW_HEADER__
++#include <stdint.h>
++
++#define thr rbr
++#define iir fcr
++#define dll rbr
++#define dlm ier
++
++struct dw_regs {
++        volatile uint32_t rbr; /* 0x00 Data register */
++        volatile uint32_t ier; /* 0x04 Interrupt Enable Register */
++        volatile uint32_t fcr; /* 0x08 FIFO Control Register */
++        volatile uint32_t lcr; /* 0x0C Line control register */
++        volatile uint32_t mcr; /* 0x10 Line control register */
++        volatile uint32_t lsr; /* 0x14 Line Status Register */
++        volatile uint32_t msr; /* 0x18 Modem Status Register */
++        volatile uint32_t spr; /* 0x20 Scratch Register */
++};
++#define UART_LCR_WLS_MSK 0x03 /* character length select mask */
++#define UART_LCR_WLS_5 0x00 /* 5 bit character length */
++#define UART_LCR_WLS_6 0x01 /* 6 bit character length */
++#define UART_LCR_WLS_7 0x02 /* 7 bit character length */
++#define UART_LCR_WLS_8 0x03 /* 8 bit character length */
++#define UART_LCR_STB 0x04 /* # stop Bits, off=1, on=1.5 or 2) */
++#define UART_LCR_PEN 0x08 /* Parity eneble */
++#define UART_LCR_EPS 0x10 /* Even Parity Select */
++#define UART_LCR_STKP 0x20 /* Stick Parity */
++#define UART_LCR_SBRK 0x40 /* Set Break */
++#define UART_LCR_BKSE 0x80 /* Bank select enable */
++#define UART_LCR_DLAB 0x80 /* Divisor latch access bit */
++
++#define UART_MCR_DTR 0x01 /* DTR   */
++#define UART_MCR_RTS 0x02 /* RTS   */
++
++#define UART_LSR_THRE 0x20 /* Transmit-hold-register empty */
++#define UART_LSR_DR 0x01 /* Receiver data ready */
++#define UART_LSR_TEMT 0x40 /* Xmitter empty */
++
++#define UART_FCR_FIFO_EN 0x01 /* Fifo enable */
++#define UART_FCR_RXSR 0x02 /* Receiver soft reset */
++#define UART_FCR_TXSR 0x04 /* Transmitter soft reset */
++
++#define UART_MCRVAL (UART_MCR_DTR | UART_MCR_RTS) /* RTS/DTR */
++#define UART_FCR_DEFVAL (UART_FCR_FIFO_EN | UART_FCR_RXSR | UART_FCR_TXSR)
++#define UART_LCR_8N1 0x03
++
++typedef enum DEV_UART device_uart;
++
++enum DEV_UART{
++        UART0,
++        UART1,
++        UART2,
++        UART3,
++};
++
++void hal_uart_init(device_uart dev_uart, int baudrate, int uart_clock);
++void hal_uart_putc(uint8_t ch);
++int hal_uart_getc(void);
++int hal_uart_tstc(void);
++
++#endif // end of __HAL_UART_DW_HEADER__
++
+diff --git a/samples/mica/src/include/openamp_common.h b/samples/mica/src/include/openamp_common.h
+new file mode 100644
+index 0000000000..ec6a461039
+--- /dev/null
++++ b/samples/mica/src/include/openamp_common.h
+@@ -0,0 +1,49 @@
++/*
++ * Copyright (c) 2024-2024 Huawei Technologies Co., Ltd. All rights reserved.
++ *
++ * UniProton is licensed under Mulan PSL v2.
++ * You can use this software according to the terms and conditions of the Mulan PSL v2.
++ * You may obtain a copy of Mulan PSL v2 at:
++ * 	http://license.coscl.org.cn/MulanPSL2
++ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
++ * EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
++ * See the Mulan PSL v2 for more details.
++ * Create: 2024-08-13
++ * Description: openamp configuration
++ */
++
++#ifndef COMMON_H__
++#define COMMON_H__
++
++#include <zephyr/kernel.h>
++#include <zephyr/types.h>
++
++#define VDEV_START_ADDR		0x83100000ull
++#define SHM_SIZE		    0x100000
++
++#define SHM_DEVICE_NAME		"lonely_device"
++
++#define VRING_COUNT		2
++
++#define VRING_RX_ADDRESS        -1  /* allocated by Master processor */
++#define VRING_TX_ADDRESS        -1  /* allocated by Master processor */
++#define VRING_BUFF_ADDRESS      -1  /* allocated by Master processor */
++
++#define VRING_ALIGNMENT		4
++#define VRING_SIZE		16
++
++#define CONFIG_RPMSG_SERVICE_NUM_ENDPOINTS	1
++
++#define DEFAULT_PAGE_SHIFT	0xffffffffffffffffULL
++#define DEFAULT_PAGE_MASK	0xffffffffffffffffULL
++
++#define VIRTQUEUE_ID		1
++#define RPMSG_ROLE		RPMSG_REMOTE
++
++#define OS_OPENAMP_NOTIFY_HWI_NUM	61
++#define OS_OPENAMP_NOTIFY_HWI_PRIO	6
++
++#define os_asm_invalidate_dcache_all() 
++
++#endif
++
+diff --git a/samples/mica/src/include/pedestal_function.h b/samples/mica/src/include/pedestal_function.h
+new file mode 100644
+index 0000000000..e9950dcea3
+--- /dev/null
++++ b/samples/mica/src/include/pedestal_function.h
+@@ -0,0 +1,11 @@
++#ifndef __PEDESTAL_FUNCTION_H
++#define __PEDESTAL_FUNCTION_H 
++
++struct pedestal_operation {
++    int  (*cpu_shut_prepare)(unsigned int* irqs, int num);   
++    void (*cpu_shutdown)(void);
++}; 
++
++extern struct pedestal_operation* g_ped_ops;
++ 
++#endif
+diff --git a/samples/mica/src/include/resource_table.h b/samples/mica/src/include/resource_table.h
+new file mode 100644
+index 0000000000..b9f654c530
+--- /dev/null
++++ b/samples/mica/src/include/resource_table.h
+@@ -0,0 +1,116 @@
++/*
++ * Copyright (c) 2024-2024 Huawei Technologies Co., Ltd. All rights reserved.
++ *
++ * UniProton is licensed under Mulan PSL v2.
++ * You can use this software according to the terms and conditions of the Mulan PSL v2.
++ * You may obtain a copy of Mulan PSL v2 at:
++ *     http://license.coscl.org.cn/MulanPSL2
++ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
++ * EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
++ * See the Mulan PSL v2 for more details.
++ * Create: 2024-08-13
++ * Description: This file populates resource table for UniProton, for use by the Linux host.
++ */
++
++#ifndef RESOURCE_TABLE_H__
++#define RESOURCE_TABLE_H__
++
++#include <zephyr/types.h>
++#include <stddef.h>
++#include <openamp/rpmsg.h>
++#include <openamp/remoteproc.h>
++#include "openamp_common.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define VDEV_ID                 0xFF
++#define VRING0_ID 0 /* (master to remote) fixed to 0 for Linux compatibility */
++#define VRING1_ID 1 /* (remote to master) fixed to 1 for Linux compatibility */
++
++#define RPMSG_IPU_C0_FEATURES   1
++#define NUM_RPMSG_BUFF          8
++
++#undef  VIRTIO_ID_RPMSG
++#define VIRTIO_ID_RPMSG         7
++#define RSC_VENDOR_EPT_TABLE    128 /* List of bound endpoints */
++
++enum rsc_table_entries {
++    RSC_TABLE_EPT_TABLE_ENTRY,
++#ifdef OS_GDB_STUB
++    RSC_TABLE_RBUF_ENTRY,
++#endif
++    RSC_TABLE_VDEV_ENTRY,
++    RSC_TABLE_NUM_ENTRY
++};
++
++METAL_PACKED_BEGIN
++struct ept_info {
++    char name[RPMSG_NAME_SIZE];
++    uint32_t addr;
++    uint32_t dest_addr;
++} METAL_PACKED_END;
++
++#define MAX_NUM_OF_EPTS 64
++
++METAL_PACKED_BEGIN
++struct fw_rsc_ept {
++    uint32_t type;
++    uint32_t num_of_epts;
++    struct ept_info endpoints[MAX_NUM_OF_EPTS];
++} METAL_PACKED_END;
++
++#ifdef OS_GDB_STUB
++#define RSC_VENDOR_RINGBUFFER   129
++#define RINGBUFFER_TOTAL_SIZE   0x2000
++
++METAL_PACKED_BEGIN
++struct fw_rsc_rbuf_pair {
++	uint32_t type;
++	uint32_t flags;
++	uint64_t da;
++	uint64_t pa;
++	uint64_t len;
++	uint8_t state;
++	uint8_t reserved[7];
++} METAL_PACKED_END;
++
++enum rbuf_state {
++	RBUF_STATE_UNINIT = 0,
++	RBUF_STATE_INIT = 1,
++	RBUF_STATE_ORDINARY_DATA = 2,
++	RBUF_STATE_CTRL_C = 3,
++	RBUF_STATE_RESTART = 4,
++};
++
++extern uint8_t get_rbuf_state(void);
++
++#endif
++
++METAL_PACKED_BEGIN
++struct fw_resource_table {
++    unsigned int ver;
++    unsigned int num;
++    unsigned int reserved[2];
++    unsigned int offset[RSC_TABLE_NUM_ENTRY];
++
++    struct fw_rsc_ept ept_table;
++#ifdef OS_GDB_STUB
++    struct fw_rsc_rbuf_pair rbufs;
++#endif
++    struct fw_rsc_vdev vdev;
++    struct fw_rsc_vdev_vring vring0;
++    struct fw_rsc_vdev_vring vring1;
++
++} METAL_PACKED_END;
++
++
++
++void rsc_table_get(void **table_ptr, int *length);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff --git a/samples/mica/src/include/rpmsg_backend.h b/samples/mica/src/include/rpmsg_backend.h
+new file mode 100644
+index 0000000000..2141d2a027
+--- /dev/null
++++ b/samples/mica/src/include/rpmsg_backend.h
+@@ -0,0 +1,55 @@
++/*
++ * Copyright (c) 2023-2023 Huawei Technologies Co., Ltd. All rights reserved.
++ *
++ * UniProton is licensed under Mulan PSL v2.
++ * You can use this software according to the terms and conditions of the Mulan PSL v2.
++ * You may obtain a copy of Mulan PSL v2 at:
++ * 	http://license.coscl.org.cn/MulanPSL2
++ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
++ * EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
++ * See the Mulan PSL v2 for more details.
++ * Create: 2024-08-13
++ * Description: openamp backend
++ */
++
++#include <zephyr/types.h>
++#include "openamp/open_amp.h"
++#include "openamp_common.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define RPMSG_VIRTIO_CONSOLE_CONFIG        \
++    (&(const struct rpmsg_virtio_config) { \
++        .h2r_buf_size = 512,  \
++        .r2h_buf_size = 512,  \
++        .split_shpool = false,\
++})
++
++extern int rpmsg_service_init(void);
++
++extern void (*g_rpmsg_ipi_handler)(void);
++
++/**
++ * rpmsg_backend_init - register rpmsg-virtio-device.
++ *
++ * Return: pointer of rpmsg_device(rpdev) on success, NULL on failure.
++ */
++extern struct rpmsg_device *rpmsg_backend_init(void);
++
++/**
++ * rpmsg_backend_remove - remove the backend
++ */
++extern void rpmsg_backend_remove(void);
++/**
++ * receive_message - Call it to receive messages from host(linux)
++ */
++extern void receive_message(void);
++
++/* 下线时，设置rsc_table的reserved[1]为CPU_OFF_FUNCID，告诉mica侧更新状态 */
++extern void rsc_table_set_offline_flag(void);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/samples/mica/src/include/rtos_cmdqu.h b/samples/mica/src/include/rtos_cmdqu.h
+new file mode 100644
+index 0000000000..ecf2dd8a8e
+--- /dev/null
++++ b/samples/mica/src/include/rtos_cmdqu.h
+@@ -0,0 +1,45 @@
++#ifndef __RTOS_COMMAND_QUEUE__
++#define __RTOS_COMMAND_QUEUE__
++
++struct valid_t {
++	unsigned char linux_valid;
++	unsigned char rtos_valid;
++} __attribute__((packed));
++
++typedef union resv_t {
++	struct valid_t valid;
++	unsigned short mstime; // 0 : noblock, -1 : block infinite
++} resv_t;
++
++typedef struct cmdqu_t cmdqu_t;
++/* cmdqu size should be 8 bytes because of mailbox buffer size */
++struct cmdqu_t {
++	unsigned char ip_id;
++	unsigned char cmd_id : 7;
++	unsigned char block : 1;
++	union resv_t resv;
++	unsigned int  param_ptr;
++} __attribute__((packed)) __attribute__((aligned(0x8)));
++
++#define MAX_CMD_NUM	 128
++/* keep those commands for ioctl system used */
++/* cmd type don't more than 128!!!!!*/
++enum SYSTEM_CMD_TYPE {
++	CMDQU_SEND_TEST 	= 0	,
++	CMDQU_DUO_TEST			,
++	CMDQU_MCS_BOOT			,
++	CMDQU_MCS_COMMUNICATE	,
++	CMDQU_SYSTEM_BUTT		,
++};
++
++typedef int (*cmdqu_irq_handler)(cmdqu_t* cmdq, void* data);
++int rtos_cmdqu_send(cmdqu_t* cmdq);
++int request_cmdqu_irq(enum SYSTEM_CMD_TYPE, cmdqu_irq_handler cmdqu_irq_func, void* data);
++
++void rtos_cmdqu_init(void);
++
++
++
++
++#endif  // end of __RTOS_COMMAND_QUEUE__
++
+diff --git a/samples/mica/src/include/segment_test.h b/samples/mica/src/include/segment_test.h
+new file mode 100644
+index 0000000000..597e606538
+--- /dev/null
++++ b/samples/mica/src/include/segment_test.h
+@@ -0,0 +1,7 @@
++#include <stdint.h>
++#include <stddef.h>
++#include <zephyr/types.h>
++
++int tst_data_segment(int* err, int* success);
++
++int tst_bss_segment(int* err, int* success);
+diff --git a/samples/mica/src/include/uart_printf.h b/samples/mica/src/include/uart_printf.h
+new file mode 100644
+index 0000000000..5b461a48b4
+--- /dev/null
++++ b/samples/mica/src/include/uart_printf.h
+@@ -0,0 +1,6 @@
++#ifndef UART_PRINTF_H
++#define UART_PRINTF_H
++
++void uart_init(void);
++int uart_printf(const char *fmt, ...);
++#endif
+diff --git a/samples/mica/src/main.c b/samples/mica/src/main.c
+new file mode 100644
+index 0000000000..c71aee2906
+--- /dev/null
++++ b/samples/mica/src/main.c
+@@ -0,0 +1,93 @@
++/*
++ * Copyright (c) 2012-2014 Wind River Systems, Inc.
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include <zephyr/kernel.h>
++#include <zephyr/types.h>
++#include <zephyr/drivers/uart.h>
++#include <zephyr/devicetree.h>
++#include <zephyr/device.h>
++#include <stdio.h>
++#include <string.h>
++#include "segment_test.h"
++#include "pedestal_function.h"
++
++struct pedestal_operation* g_ped_ops;
++uint64_t g_mtvec_tmp;
++#define MICA_TSK_STKSIZE    0x3000
++#define MICA_TSK_PRIORTY    10
++K_THREAD_STACK_DEFINE(mica_tsk_stack_area, MICA_TSK_STKSIZE);
++static struct k_thread 	g_micataskHandle;
++static k_tid_t		g_micataskPid; 
++static void mica_test_thread(void* , void* , void*)
++{
++    int ret;
++    ret = rpmsg_service_init();
++    if (ret) 
++    {
++        uart_printf("rpmsg_service init failed!\n");
++        return;
++    }
++}
++
++int main(void)
++{
++	uart_init();
++	rtos_cmdqu_init();
++	int ret, err, success;
++	int tmp_success, tmp_err;
++	
++	err = 0;
++	success = 0;
++	tmp_err = 0;
++	tmp_success =0;
++	ret = tst_data_segment(&tmp_err, &tmp_success);
++	if(ret ==0)
++	{
++		uart_printf("[test]: pass data segment test %d/%d\n", tmp_success, (tmp_success + tmp_err));
++		err += tmp_err;
++		success += tmp_success;
++	}
++	else
++	{
++		uart_printf("[test]: function \"tst_data_segment\" error! retval: %d\n", ret);
++		return -1;
++	}
++
++	ret = tst_bss_segment(&tmp_err, &tmp_success);
++	if(ret == 0)
++	{
++		uart_printf("[test]: pass bss segment test %d/%d\n", tmp_success, (tmp_success + tmp_err));
++                err += tmp_err;
++                success += tmp_success;
++	}
++	else
++	{
++		uart_printf("[test]: function \"tst_bss_segment\" error! retval: %d\n", ret);
++                return -1;
++	}
++	
++	uart_printf("[test]: pass test %d/%d\n", success, (success + err));
++	if(err != 0)
++	{
++		return -EFAULT;
++	}
++	
++	ret = RpmsgHwiInit();
++	if(ret != 0)
++	{
++		uart_printf("[openamp]: rpmsgHwInit err!\n");
++		return -EFAULT;
++	}
++	
++	g_micataskPid = k_thread_create(&g_micataskHandle, mica_tsk_stack_area, K_THREAD_STACK_SIZEOF(mica_tsk_stack_area), mica_test_thread, NULL, NULL, NULL, MICA_TSK_PRIORTY, 0, K_NO_WAIT);
++	if(g_micataskPid < 0)
++	{
++		uart_printf("[openamp]: create mica task failed!\n");
++		return -EFAULT;
++	}
++
++	return 0;
++}
+diff --git a/samples/mica/src/mica_init.c b/samples/mica/src/mica_init.c
+new file mode 100644
+index 0000000000..3e53fe00f7
+--- /dev/null
++++ b/samples/mica/src/mica_init.c
+@@ -0,0 +1,28 @@
++/*
++ * Copyright (c) 2024-2024 Huawei Technologies Co., Ltd. All rights reserved.
++ *
++ * UniProton is licensed under Mulan PSL v2.
++ * You can use this software according to the terms and conditions of the Mulan PSL v2.
++ * You may obtain a copy of Mulan PSL v2 at:
++ *     http://license.coscl.org.cn/MulanPSL2
++ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
++ * EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
++ * See the Mulan PSL v2 for more details.
++ * Create: 2024-08-13
++ * Description: This file populates resource table for UniProton, for use by the Linux host.
++ */
++
++#include <zephyr/kernel.h>
++#include <zephyr/irq.h>
++#include <string.h>
++#include "rpmsg_backend.h"
++#include "openamp_common.h"
++
++extern void cmdqu_intr(const struct device *dev);
++
++uint32_t RpmsgHwiInit(void)
++{
++	irq_connect_dynamic(OS_OPENAMP_NOTIFY_HWI_NUM, OS_OPENAMP_NOTIFY_HWI_PRIO, cmdqu_intr, NULL, 0);
++	irq_enable(OS_OPENAMP_NOTIFY_HWI_NUM);
++	return 0;
++}
+diff --git a/samples/mica/src/resource_table.c b/samples/mica/src/resource_table.c
+new file mode 100644
+index 0000000000..3c54f5bf72
+--- /dev/null
++++ b/samples/mica/src/resource_table.c
+@@ -0,0 +1,82 @@
++/*
++ * Copyright (c) 2024-2024 Huawei Technologies Co., Ltd. All rights reserved.
++ *
++ * UniProton is licensed under Mulan PSL v2.
++ * You can use this software according to the terms and conditions of the Mulan PSL v2.
++ * You may obtain a copy of Mulan PSL v2 at:
++ *     http://license.coscl.org.cn/MulanPSL2
++ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
++ * EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
++ * See the Mulan PSL v2 for more details.
++ * Create: 2024-08-15
++ * Description: This file populates resource table for UniProton, for use by the Linux host.
++ */
++
++#include "resource_table.h"
++
++
++#ifndef OS_SEC_RSC_TABLE
++#define OS_SEC_RSC_TABLE __attribute__((section(".resource_table")))
++#endif
++
++OS_SEC_RSC_TABLE static struct fw_resource_table resource_table = {
++    .ver = 1,
++    .num = RSC_TABLE_NUM_ENTRY,
++    .offset = {
++        offsetof(struct fw_resource_table, ept_table),
++#ifdef OS_GDB_STUB
++        offsetof(struct fw_resource_table, rbufs),
++#endif
++        offsetof(struct fw_resource_table, vdev),
++    },
++
++    .ept_table = {
++        .type = RSC_VENDOR_EPT_TABLE,
++	.num_of_epts = 0,
++    },
++#ifdef OS_GDB_STUB
++    .rbufs = {RSC_VENDOR_RINGBUFFER, 0, 0, 0, RINGBUFFER_TOTAL_SIZE, 0, {0}},
++#endif
++    /* Virtio device entry */
++    .vdev = {
++        RSC_VDEV, VIRTIO_ID_RPMSG, 2, RPMSG_IPU_C0_FEATURES, 0, 0, 0,
++        VRING_COUNT, {0, 0},
++    },
++
++    /* Vring rsc entry - part of vdev rsc entry */
++    .vring0 = {VRING_TX_ADDRESS, VRING_ALIGNMENT,
++                   NUM_RPMSG_BUFF, VRING0_ID, 0},
++    .vring1 = {VRING_RX_ADDRESS, VRING_ALIGNMENT,
++           NUM_RPMSG_BUFF, VRING1_ID, 0},
++} ;
++
++void rsc_table_get(void **table_ptr, int *length)
++{
++    *table_ptr = (void *)&resource_table;
++    *length = sizeof(resource_table);
++}
++
++#ifdef OS_GDB_STUB
++#include "prt_gdbstub_ext.h"
++#define PA2VA(pa) (pa)
++
++extern int RBufferPairInit(uintptr_t rxaddr, uintptr_t txaddr, int len);
++
++static STUB_DATA struct GdbRingBufferCfg g_rbufCfg;
++STUB_TEXT struct GdbRingBufferCfg *OsGetGdbRingBufferCfg()
++{
++    uintptr_t tx_va, rx_va;
++
++    while (resource_table.rbufs.state == RBUF_STATE_UNINIT) {
++        os_asm_invalidate_dcache_all();
++    }
++
++    os_asm_invalidate_dcache_all();
++    tx_va = PA2VA(resource_table.rbufs.pa);
++    rx_va = tx_va + RINGBUFFER_TOTAL_SIZE / 2;
++    g_rbufCfg.rxaddr = rx_va;
++    g_rbufCfg.txaddr = tx_va;
++    g_rbufCfg.size = RINGBUFFER_TOTAL_SIZE / 2;
++    return &g_rbufCfg;
++}
++#endif
+diff --git a/samples/mica/src/rpmsg_backend_rsc_table.c b/samples/mica/src/rpmsg_backend_rsc_table.c
+new file mode 100644
+index 0000000000..314de7d269
+--- /dev/null
++++ b/samples/mica/src/rpmsg_backend_rsc_table.c
+@@ -0,0 +1,380 @@
++/*
++ * Copyright (c) 2024-2024 Huawei Technologies Co., Ltd. All rights reserved.
++ *
++ * UniProton is licensed under Mulan PSL v2.
++ * You can use this software according to the terms and conditions of the Mulan PSL v2.
++ * You may obtain a copy of Mulan PSL v2 at:
++ *     http://license.coscl.org.cn/MulanPSL2
++ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
++ * EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
++ * See the Mulan PSL v2 for more details.
++ * Create: 2024-08-15
++ * Description: openamp rsctable backend
++ */
++
++#include <metal/device.h>
++#include <metal/cache.h>
++#include "rpmsg_backend.h"
++#include "resource_table.h"
++#include <zephyr/kernel.h>
++#include "uart_printf.h"
++#if defined(OS_GDB_STUB)
++#include "prt_notifier.h"
++#endif
++
++#include "pedestal_function.h"
++
++#include "rtos_cmdqu.h"
++/*
++ * Use resource tables's  reserved[0] to carry some extra information.
++ * The following IDs come from PSCI definition
++ */
++#define CPU_ON_FUNCID    0xC4000003
++#define CPU_OFF_FUNCID   0x84000002
++#define SYSTEM_RESET     0x84000009
++
++#define MAX_SEM_MOUNT    1024
++
++K_SEM_DEFINE(msg_sem, 0, MAX_SEM_MOUNT);
++K_SEM_DEFINE(shutdown, 0, 1);
++static struct virtio_device *vdev;
++static struct rpmsg_virtio_device rvdev;
++
++static metal_phys_addr_t shm_physmap[] = { VDEV_START_ADDR };
++static struct metal_device shm_device = {
++    .name = SHM_DEVICE_NAME,
++    .num_regions = 2,
++    .regions = {
++        /*
++         * shared memory io, only the addr in [share mem start + share mem size]
++         * can be accessed and guaranteed by metal_io_read/write
++         */
++        {.virt = NULL},
++        /*
++         * resource table io, only the addr in [resource table start + table size]
++         * can be accessed and guaranteed by metal_io_read/write
++         */
++        {.virt = NULL},
++    },
++    .node = { NULL },
++    .irq_num = 0,
++    .irq_info = NULL
++};
++
++static inline struct fw_rsc_vdev *rsc_table_to_vdev(void *rsc_table)
++{
++    return &((struct fw_resource_table *)rsc_table)->vdev;
++}
++
++static inline struct fw_rsc_vdev_vring *rsc_table_get_vring0(void *rsc_table)
++{
++    return &((struct fw_resource_table *)rsc_table)->vring0;
++}
++
++static inline struct fw_rsc_vdev_vring *rsc_table_get_vring1(void *rsc_table)
++{
++    return &((struct fw_resource_table *)rsc_table)->vring1;
++}
++
++static int virtio_notify(void *priv, uint32_t id)
++{
++    int ret;
++    cmdqu_t notify_cmd;
++    notify_cmd.ip_id = 0;
++    notify_cmd.cmd_id = CMDQU_MCS_COMMUNICATE;
++    notify_cmd.block = 0;
++    notify_cmd.resv.mstime = 0;
++    notify_cmd.param_ptr = id;
++    ret = rtos_cmdqu_send(&notify_cmd);
++    return ret;
++}
++
++static void reset_vq(void)
++{
++    if (rvdev.svq != NULL) {
++        /*
++         * For svq:
++         * vq_free_cnt: Set to vq_nentries, all descriptors in the svq are available.
++         * vq_queued_cnt: Set to 0, no descriptors waiting to be processed in the svq.
++         * vq_desc_head_idx: Set to 0, the next available descriptor is at the beginning
++         *                   of the descriptor table.
++         * vq_available_idx: Set to 0, No descriptors have been added to the available ring.
++         * vq_used_cons_idx: No descriptors have been added to the used ring.
++         * vq_ring.avail->idx and vq_ring.used->idx will be set at host.
++         */
++        rvdev.svq->vq_free_cnt = rvdev.svq->vq_nentries;
++        rvdev.svq->vq_queued_cnt = 0;
++        rvdev.svq->vq_desc_head_idx = 0;
++        rvdev.svq->vq_available_idx = 0;
++        rvdev.svq->vq_used_cons_idx = 0;
++    }
++
++    if (rvdev.rvq != NULL) {
++        /*
++         * For rvq:
++         * Because host resets its tx vq, on the remote side,
++         * it also needs to reset the rx rq.
++         */
++        rvdev.rvq->vq_available_idx = 0;
++        rvdev.rvq->vq_used_cons_idx = 0;
++        rvdev.rvq->vq_ring.used->idx = 0;
++        rvdev.rvq->vq_ring.avail->idx = 0;
++        metal_cache_flush(&(rvdev.rvq->vq_ring.used->idx),
++                          sizeof(rvdev.rvq->vq_ring.used->idx));
++        metal_cache_flush(&(rvdev.rvq->vq_ring.avail->idx),
++                          sizeof(rvdev.rvq->vq_ring.avail->idx));
++    }
++}
++
++static int rpmsg_ipi_handler(cmdqu_t* cmdq, void* private_data)
++{
++    (void)private_data;
++    void *rsc;
++    int rsc_size;
++    uint32_t status;
++    struct fw_resource_table *rsc_table;
++
++    rsc_table_get(&rsc, &rsc_size);
++    rsc_table = (struct fw_resource_table *)rsc;
++
++    os_asm_invalidate_dcache_all();
++    k_usleep(1500);
++    status = rsc_table->reserved[0];
++
++#ifdef OS_GDB_STUB
++#define NOTIFY_VAL 2
++    if (rsc_table->rbufs.state == RBUF_STATE_CTRL_C) {
++        rsc_table->rbufs.state = RBUF_STATE_ORDINARY_DATA;
++        os_asm_invalidate_dcache_all();
++        OsNotifyDie(NOTIFY_VAL, NULL);
++    }
++#endif
++    if (status == CPU_ON_FUNCID || status == 0) {
++        /* normal work */
++        k_sem_give(&msg_sem);
++    } else if (status == SYSTEM_RESET) {
++        /* attach work: reset virtqueue */
++        reset_vq();
++        /* clear reserved[0] as the reset work is done */
++        rsc_table->reserved[0] = 0;
++        os_asm_invalidate_dcache_all();
++    } else if (status == CPU_OFF_FUNCID) {
++#if defined(OS_OPTION_POWEROFF)
++#if defined(OS_GDB_STUB)
++        rsc_table->rbufs.state = RBUF_STATE_RESTART;
++        os_asm_invalidate_dcache_all();
++#endif
++        PRT_SysPowerOff();
++#endif
++	    uart_printf("shut!!!!\n");
++	    k_sem_give(&shutdown);
++    }
++    return 0;
++}
++
++/* 下线时，设置rsc_table的reserved[1]为CPU_OFF_FUNCID，告诉mica侧更新状态 */
++void rsc_table_set_offline_flag(void)
++{
++    void *rsc;
++    int rsc_size;
++    uint32_t status;
++    (void)status;
++    struct fw_resource_table *rsc_table;
++
++    rsc_table_get(&rsc, &rsc_size);
++    rsc_table = (struct fw_resource_table *)rsc;
++
++    rsc_table->reserved[0] = CPU_OFF_FUNCID;
++    os_asm_invalidate_dcache_all();
++}
++
++void receive_message(void)
++{
++    uint32_t ret = k_sem_take(&msg_sem, K_FOREVER);
++
++    if (ret == 0)
++        rproc_virtio_notified(vdev, VRING1_ID);
++}
++
++static void rpmsg_ipi_init(void)
++{
++    request_cmdqu_irq(CMDQU_MCS_COMMUNICATE, rpmsg_ipi_handler, NULL);
++}
++
++struct virtio_device *
++platform_create_vdev(void *rsc_table, struct metal_io_region *rsc_io)
++{
++    struct fw_rsc_vdev_vring *vring_rsc;
++    struct virtio_device *vdev;
++    int ret;
++
++    vdev = rproc_virtio_create_vdev(VIRTIO_DEV_DEVICE, VDEV_ID,
++                    rsc_table_to_vdev(rsc_table),
++                    rsc_io, NULL, virtio_notify, NULL);
++    if (!vdev)
++        return NULL;
++
++    /* wait master rpmsg init completion */
++    rproc_virtio_wait_remote_ready(vdev);
++
++    vring_rsc = rsc_table_get_vring0(rsc_table);
++    uart_printf("[openamp]: get vring0: da %lx\n", vring_rsc->da);
++
++    ret = rproc_virtio_init_vring(vdev, 0, vring_rsc->notifyid,
++                      (void *)(uintptr_t)vring_rsc->da, rsc_io,
++                      vring_rsc->num, vring_rsc->align);
++    if (ret)
++        goto failed;
++
++    vring_rsc = rsc_table_get_vring1(rsc_table);
++    uart_printf("[openamp]: get vring1: da %lx\n", vring_rsc->da);
++
++    ret = rproc_virtio_init_vring(vdev, 1, vring_rsc->notifyid,
++                      (void *)(uintptr_t)vring_rsc->da, rsc_io,
++                      vring_rsc->num, vring_rsc->align);
++    if (ret)
++        goto failed;
++
++    return vdev;
++
++failed:
++    rproc_virtio_remove_vdev(vdev);
++    return NULL;
++}
++
++#define SHUTDOWNTASK_STKSIZE 4096
++#define SHUTDOWNTASK_STKPRIO 2
++K_THREAD_STACK_DEFINE(stack_area, SHUTDOWNTASK_STKSIZE);
++static struct k_thread g_shutdownTskHandle;
++static k_tid_t g_shutdownTskPid;
++static void shutdownTask(void* , void* , void*)
++{
++	while(1)
++	{
++		uint32_t ret = k_sem_take(&shutdown, K_FOREVER);
++		int local_restore = irq_lock();
++		if(ret == 0)
++		{
++			uart_printf("start to shut down Zephyr , goto uni_pedestal firmware!\n");
++			if(g_ped_ops != NULL && g_ped_ops->cpu_shut_prepare != NULL && g_ped_ops->cpu_shutdown != NULL)
++			{
++				//ugly wait to do more!
++				unsigned int x = 61;
++				g_ped_ops->cpu_shut_prepare(&x, 1);
++				uart_printf("shutdown prepare done !\n");
++				g_ped_ops->cpu_shutdown();
++				uart_printf("shutdown error!\n");
++			}
++			else
++				uart_printf("don't register shutdown function!\n");
++		}
++		irq_unlock(local_restore);
++	}
++}
++
++
++/**
++ * rpmsg_backend_init - register rpmsg-virtio-device.
++ *
++ * Init a rpmsg backend based on the the integration of
++ * a resource table in the elf file.
++ *
++ * Return: pointer of rpmsg_device(rpdev) on success, NULL on failure.
++ */
++struct rpmsg_device *rpmsg_backend_init(void)
++{
++    void *rsc_table;
++    struct metal_io_region *rsc_io, *shm_io;
++    int rsc_size;
++    int32_t err;
++    struct metal_init_params metal_params = METAL_INIT_DEFAULTS;
++    struct metal_device *device;
++
++    rpmsg_ipi_init();
++
++    g_shutdownTskPid = k_thread_create(&g_shutdownTskHandle, stack_area, K_THREAD_STACK_SIZEOF(stack_area), shutdownTask, NULL, NULL, NULL, SHUTDOWNTASK_STKPRIO, 0, K_NO_WAIT);
++    
++    if(g_shutdownTskPid < 0)
++    {
++        uart_printf("[openamp] shutdown task create error");
++        goto cleanup_ipi;
++    }
++
++    /* Libmetal setup */
++    err = metal_init(&metal_params);
++    if (err) {
++        uart_printf("[openamp] metal_init failed %d\n", err);
++        goto cleanup_shutTsk;
++    }
++
++    uart_printf("shm_device name %s\n",shm_device.name);
++    uart_printf("shm_device region num %d\n",shm_device.num_regions);
++    err = metal_register_generic_device(&shm_device);
++    if (err) {
++        uart_printf("[openamp] Couldn't register shared memory device %d\n", err);
++        goto cleanup_metal;
++    }
++
++    err = metal_device_open("generic", SHM_DEVICE_NAME, &device);
++    if (err) {
++        uart_printf("[openamp] metal_device_open failed %d\n", err);
++        goto cleanup_metal;
++    }
++
++    metal_io_init(&device->regions[0], (void *)VDEV_START_ADDR, &shm_physmap,
++              SHM_SIZE, -1, 0, NULL);
++
++    shm_io = metal_device_io_region(device, 0);
++    if (!shm_io) {
++        uart_printf("[openamp] get shared memory io region failed %d\n", err);
++        goto cleanup_metal;
++    }
++
++    rsc_table_get(&rsc_table, &rsc_size);
++    uart_printf("[openamp] get rsctable %lx, size %lx \n", rsc_table, rsc_size);
++
++    metal_io_init(&device->regions[1], rsc_table, (metal_phys_addr_t *)rsc_table,
++              rsc_size, -1, 0, NULL);
++
++    rsc_io = metal_device_io_region(device, 1);
++    if (!rsc_io) {
++        uart_printf("[openamp] get rsctable io region failed %d\n", err);
++        goto cleanup_metal;
++    }
++
++    /* virtio device setup */
++    vdev = platform_create_vdev(rsc_table, rsc_io);
++    if (!vdev) {
++        uart_printf("[openamp] create virtio device failed %d\n", err);
++        goto cleanup_metal;
++    }
++
++    /* setup rvdev */
++    err = rpmsg_init_vdev_with_config(&rvdev, vdev, NULL, shm_io, NULL, RPMSG_VIRTIO_CONSOLE_CONFIG);
++    if (err) {
++        uart_printf("[openamp] rpmsg_init_vdev_with_config failed %d\n", err);
++        goto cleanup_vdev;
++    }
++
++    return rpmsg_virtio_get_rpmsg_device(&rvdev);
++
++cleanup_vdev:
++    rproc_virtio_remove_vdev(vdev);
++cleanup_metal:
++    metal_finish();
++cleanup_shutTsk:
++    k_thread_abort(g_shutdownTskPid);
++cleanup_ipi:
++    request_cmdqu_irq(CMDQU_MCS_COMMUNICATE, NULL, NULL);
++    return NULL;
++}
++
++void rpmsg_backend_remove(void)
++{
++    rpmsg_deinit_vdev(&rvdev);
++    rproc_virtio_remove_vdev(vdev);
++    metal_finish();
++    k_thread_abort(g_shutdownTskPid);
++    request_cmdqu_irq(CMDQU_MCS_COMMUNICATE, NULL, NULL);
++    return;
++}
+diff --git a/samples/mica/src/rpmsg_service.c b/samples/mica/src/rpmsg_service.c
+new file mode 100644
+index 0000000000..0175544d58
+--- /dev/null
++++ b/samples/mica/src/rpmsg_service.c
+@@ -0,0 +1,241 @@
++/*
++ * Copyright (c) 2023-2023 Huawei Technologies Co., Ltd. All rights reserved.
++ *
++ * UniProton is licensed under Mulan PSL v2.
++ * You can use this software according to the terms and conditions of the Mulan PSL v2.
++ * You may obtain a copy of Mulan PSL v2 at:
++ * 	http://license.coscl.org.cn/MulanPSL2
++ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
++ * EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
++ * See the Mulan PSL v2 for more details.
++ * Create: 2024-08-16
++ * Description: openamp configuration
++ */
++
++#include <zephyr/types.h>
++#include <zephyr/kernel.h>
++#include <zephyr/irq.h>
++#include <zephyr/spinlock.h>
++#include <stdio.h>
++#include <string.h>
++#include "rpmsg_backend.h"
++#include "uart_printf.h"
++/*
++static const char* uniproton_logo[15] = {
++" _   _       _ ____            _              \n",
++"| | | |_ __ (_)  _ \\ _ __ ___ | |_ ___  _ __  \n",
++"| | | | '_ \\| | |_) | '__/ _ \\| __/ _ \\| '_ \\ \n",
++"| |_| | | | | |  __/| | | (_) | || (_) | | | |\n",
++" \\___/|_| |_|_|_|   |_|  \\___/ \\__\\___/|_| |_|\n",
++NULL,
++};
++*/
++
++static const char* uniproton_logo[30] = {
++"@@@@@@@@@@@@@@@@@@@@@@@@@@#+==+#@@@@@@@@@@@@@@@@@@@@@@@@\n",
++"@@@@@@@@@@@@@@@@@@@@@@%*-:..:...:=*%@@@@@@@@@@@@@@@@@@@@\n",
++"@@@@@@@@@@@@@@@@@@%#=:...-+#@@#=:...-+#@@@@@@@@@@@@@@@@@\n",
++"@@@@@@@@@@@@@@@%+-...:=*%@@@@@@@@%*-:..:=*%@@@@@@@@@@@@@\n",
++"@@@@@@@@@@@%*=:...-+#@@@@@@@@@@@@@@@@#+-...:+#@@@@@@@@@@\n",
++"@@@@@@@@#+-...:=#%@@@@@@@@@@@@@@@@@@@@@@%*=:..:-*%@@@@@@\n",
++"@@@@@*=:...-*%@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@#+-...:=#@@@\n",
++"@@@@=..:+#@@@@@@@=+++++++++*%@@@@@@@@@@@@@@@@@@%*=:..+@@\n",
++"@@@%.::%@@@@@@@@+ ...    ....-%@@@@@@@@@@@@@@@@@@@*..:@@\n",
++"@@@%::.%@@@@@@@@:::.=****=:::.:@@@@@@@@@@@@@@@@@@@*..-@@\n",
++"@@@%.:.%@@@@@@@+.:.-@@@@@@:.::.%@@@@@@@@@@@@@@@@@@*..-@@\n",
++"@@@%.:.%@@@@@@@:.:.=*+++=:.:..=@@@@@@@@@@@@@@@@@@@*..-@@\n",
++"@@@%.:.%@@@@@@+.:.:-::. ..:.:+@@@@@@@@@@@@@@@@@@@@*..-@@\n",
++"@@@%.:.%@@@@@@:.:.#@@@%+.::.=@@@@@@@@@@@@@@@@@@@@@*..-@@\n",
++"@@@%.:.%@@@@@+.:.=@@@@@@*:.:.-@@************#%@@@@*..-@@\n",
++"@@@%.:.%@@@@@::::%@@@@@@@%-...:%@%@@@@@#***#%%@@@@*..-@@\n",
++"@@@%.:.%@@@@=.:.+@@@@@@@@@@+++++@@@@@@%***#@@@@@@@*..-@@\n",
++"@@@%.:.%@@@@%%%%@@@@@@@@@@@@%*##*@@@@#***%@@@@@@@@*..-@@\n",
++"@@@%.:.%@@@@@@@@@@@@@@@@@@@@@%****%@#***%@@@@@@@@@*..-@@\n",
++"@@@%.:.%@@@@@@@@@@@@@@@@@@@@@@@#******#@@@@@@@@@@@*.::@@\n",
++"@@@@-..-*%@@@@@@@@@@@@@@@@@@@@@@%****#@@@@@@@@@@#+:..+@@\n",
++"@@@@@+-...:=#@@@@@@@@@@@@@@@@@@@@@#*%@@@@@@@%*=:..:-*@@@\n",
++"@@@@@@@%*=:...-+%@@@@@@@@@@@@@@@@@@%@@@@@#+-...:+#@@@@@@\n",
++"@@@@@@@@@@@#+-...:=*%@@@@@@@@@@@@@@@@%*=:..:=*%@@@@@@@@@\n",
++"@@@@@@@@@@@@@@%#=:...-+#@@@@@@@@@@#+:...-+#@@@@@@@@@@@@@\n",
++"@@@@@@@@@@@@@@@@@@%*-...:=*%@@%*-...:=*%@@@@@@@@@@@@@@@@\n",
++"@@@@@@@@@@@@@@@@@@@@@@#+:...::...-+#@@@@@@@@@@@@@@@@@@@@\n",
++"@@@@@@@@@@@@@@@@@@@@@@@@@%*-:-=*%@@@@@@@@@@@@@@@@@@@@@@@\n",
++NULL
++};
++
++
++struct rpmsg_rcv_msg {
++    void *data;
++    size_t len;
++};
++
++static struct rpmsg_device *rpdev;
++
++/* RPMsg rpc */
++#define RPMSG_RPC_EPT_NAME "rpmsg-rpc"
++//static struct rpmsg_endpoint rpc_ept;
++extern int rpmsg_client_cb(struct rpmsg_endpoint *ept,
++               void *data, size_t len,
++               uint32_t src, void *priv);
++
++//extern void rpmsg_set_default_ept(struct rpmsg_endpoint *ept);
++/* RPMsg tty */
++#define RPMSG_TTY_EPT_NAME  "rpmsg-tty"
++#define MAX_SEM_MOUNT       1024
++K_SEM_DEFINE(tty_sem, 0, MAX_SEM_MOUNT)
++static struct rpmsg_endpoint tty_ept;
++static struct rpmsg_rcv_msg tty_msg;
++
++char *g_s1 = "Hello, UniProton! \r\n";
++
++static void rpmsg_service_unbind(struct rpmsg_endpoint *ep)
++{
++    rpmsg_destroy_ept(ep);
++}
++
++unsigned int is_tty_ready(void)
++{
++    return is_rpmsg_ept_ready(&tty_ept);
++}
++
++int send_message(unsigned char *message, int len)
++{
++    int ret;
++    int intSave = irq_lock();
++    if (!is_rpmsg_ept_ready(&tty_ept)) {
++	    irq_unlock(intSave);
++        return 0;
++    }
++    ret = rpmsg_send(&tty_ept, message, len);
++    irq_unlock(intSave);
++    return ret;
++}
++
++static int rpmsg_rx_tty_callback(struct rpmsg_endpoint *ept, void *data,
++                   size_t len, uint32_t src, void *priv)
++{
++    struct rpmsg_rcv_msg *tty_msg = priv;
++
++    rpmsg_hold_rx_buffer(ept, data);
++    tty_msg->data = data;
++    tty_msg->len = len;
++    k_sem_give(&tty_sem);
++    return 0;
++}
++
++#define RPMSGTTYTSK_STKSIZE   0x5000
++#define RPMSGTTYTSK_PRIORTY   11  
++K_THREAD_STACK_DEFINE(rpmsg_stk_area, RPMSGTTYTSK_STKSIZE);
++static struct k_thread  g_rpmsg_ttyTskHandle;
++static k_tid_t          g_rpmsg_ttyTskPid;
++static void rpmsg_tty_task(void*, void*, void*)
++{
++    int ret;
++#ifndef LOSCFG_SHELL_MICA_INPUT
++    char tx_buff[512];
++#endif
++    char *tty_data;
++    uart_printf("[openamp] tty task started\n");
++
++    tty_ept.priv = &tty_msg;
++    ret = rpmsg_create_ept(&tty_ept, rpdev, RPMSG_TTY_EPT_NAME,
++                   RPMSG_ADDR_ANY, RPMSG_ADDR_ANY,
++                   rpmsg_rx_tty_callback, NULL);
++    if (ret != 0) {
++        uart_printf("[openamp] tty endpoint ret:%d \n", ret);
++        goto err;
++    }
++    for(int i=0; i<30;i++)
++    {
++        if(uniproton_logo[i] == NULL)
++            break;
++        uart_printf("%s", uniproton_logo[i]);
++    }
++
++    while (tty_ept.addr !=  RPMSG_ADDR_ANY) {
++        k_sem_take(&tty_sem, K_FOREVER);
++        if (tty_msg.len) {
++            tty_data = (char *)tty_msg.data;
++            tty_data[tty_msg.len] = '\0';
++            #ifdef LOSCFG_SHELL_MICA_INPUT
++                ShellCB *shellCb = OsGetShellCB();
++                if (shellCb == NULL) {
++                    send_message((void *)g_s1, strlen(g_s1) * sizeof(char));
++                } else {
++                    for(int i = 0; i < tty_msg.len; i++){
++                        char c = tty_data[i];
++                        ShellCmdLineParse(c, (pf_OUTPUT)mica_uart_printf, shellCb);
++                    }
++                }
++            #else
++                ret = snprintf(tx_buff, 512, "Hello, UniProton! Recv: %s\r\n", tty_data);
++                rpmsg_send(&tty_ept, tx_buff, ret);
++            #endif
++                rpmsg_release_rx_buffer(&tty_ept, tty_msg.data);
++
++        }
++        tty_msg.len = 0;
++        tty_msg.data = NULL;
++        /* TODO: add lifecycle */
++    }
++    rpmsg_destroy_ept(&tty_ept);
++err:
++    k_sem_reset(&tty_sem);
++    return;
++}
++
++
++#define RPMSGLSTSK_STKSIZE   0x4200
++#define RPMSGLSTSK_PRIORTY   10
++K_THREAD_STACK_DEFINE(rpmsg_lstsk_area, RPMSGLSTSK_STKSIZE);
++static struct k_thread  g_rpmsg_listenTskHandle;
++static k_tid_t          g_rpmsg_listenTskPid;
++static void rpmsg_listen_task(void*, void*, void*)
++{
++    /* Waiting for messages from host */
++    while (1) {
++        receive_message();
++    }
++    return;
++}
++
++int rpmsg_service_init(void)
++{
++    /* init rpmsg device */
++    rpdev = rpmsg_backend_init();
++    if (!rpdev) {
++        uart_printf("[openamp] failed to init rpmsg device\n");
++        return -EFAULT;
++    }
++
++    g_rpmsg_listenTskPid = k_thread_create(&g_rpmsg_listenTskHandle, rpmsg_lstsk_area,
++                                 K_THREAD_STACK_SIZEOF(rpmsg_lstsk_area),
++                                 rpmsg_listen_task,
++                                 NULL, NULL, NULL,
++                                 RPMSGLSTSK_PRIORTY, 0, K_NO_WAIT);
++    if(g_rpmsg_listenTskPid < 0 )
++    {
++	    uart_printf("[openamp]: create listen task error!\n");
++	    goto lstsk_err;    
++    }
++    
++    g_rpmsg_ttyTskPid = k_thread_create(&g_rpmsg_ttyTskHandle, rpmsg_stk_area,
++                                 K_THREAD_STACK_SIZEOF(rpmsg_stk_area),
++                                 rpmsg_tty_task,
++                                 NULL, NULL, NULL,
++                                 RPMSGTTYTSK_PRIORTY, 0, K_NO_WAIT);
++    if(g_rpmsg_ttyTskPid < 0)
++    {
++	    uart_printf("[openamp]: create tty task error!\n");
++	    goto ttytsk_err;
++    }
++    uart_printf("[openamp] ept ready\n");
++    return 0;
++
++ttytsk_err:
++    k_thread_abort(g_rpmsg_listenTskPid);
++lstsk_err:
++    rpmsg_backend_remove();
++    return -EINVAL;
++}
++
+diff --git a/samples/mica/src/rtos_cmdqu.c b/samples/mica/src/rtos_cmdqu.c
+new file mode 100644
+index 0000000000..cc7f0a1eba
+--- /dev/null
++++ b/samples/mica/src/rtos_cmdqu.c
+@@ -0,0 +1,214 @@
++#include <zephyr/types.h>
++#include <zephyr/kernel.h>
++#include <zephyr/device.h>
++#include <zephyr/devicetree.h>
++#include <stdio.h>
++#include "cvi_spinlock.h"
++#include "rtos_cmdqu.h"
++#include "uart_printf.h"
++#define DT_DRV_COMPAT sophgo_cvi_mailbox
++
++#define MBOX_BASE   DT_INST_REG_ADDR(0)
++#define MBOX_TX_CPU DT_INST_PROP(0, tx_cpu)
++#define MBOX_RX_CPU DT_INST_PROP(0, rx_cpu)
++
++#define MBOX_INT_ENABLE(cpu) (MBOX_BASE + 0x00 + (0x04 * cpu))
++#define MBOX_INT_CLEAR(cpu)  (MBOX_BASE + 0x10 + (0x10 * cpu))
++#define MBOX_INT_DONE(cpu)   (MBOX_BASE + 0x18 + (0x10 * cpu))
++#define MBOX_INT_TRIGER      (MBOX_BASE + 0x60)
++#define MBOX_BUFFER          (MBOX_BASE + 0x400)
++
++#define MBOX_MAX_NUM 8
++
++static cmdqu_irq_handler g_cmd_handler[MAX_CMD_NUM];
++static void* g_private_data[MAX_CMD_NUM];
++#define CMDID_VALID(x)  				((x) >= CMDQU_SEND_TEST && (x) < CMDQU_SYSTEM_BUTT)
++#define CMDID_INVALID(x)				(!CMDID_VALID(x))
++static inline int cmdid_handler_occupied(enum SYSTEM_CMD_TYPE cmdid)
++{
++	if(CMDID_INVALID(cmdid))
++		return -EINVAL;
++	if(g_cmd_handler[cmdid - CMDQU_SEND_TEST] != NULL)
++		return -EEXIST;
++	return 0;
++}
++
++static inline int cmdid_handler_free(enum SYSTEM_CMD_TYPE cmdid)
++{
++	int ret = cmdid_handler_occupied(cmdid);
++	if(ret < 0)
++		return ret;
++	return !ret;
++}
++//private function
++static inline void __set_cmdid_handler(enum SYSTEM_CMD_TYPE cmdid, cmdqu_irq_handler handler, void* data)
++{
++		g_cmd_handler[cmdid - CMDQU_SEND_TEST] = handler;
++		g_private_data[cmdid - CMDQU_SEND_TEST] = data;
++}
++
++int request_cmdqu_irq(enum SYSTEM_CMD_TYPE cmdid, cmdqu_irq_handler cmdqu_irq_func, void* data)
++{
++	if(CMDID_INVALID(cmdid))
++		return -EINVAL;
++	__set_cmdid_handler(cmdid, cmdqu_irq_func, data);
++	return 0;
++}
++
++
++
++DEFINE_CVI_SPINLOCK(mailbox_lock, SPIN_MBOX);
++
++int rtos_cmdqu_send(cmdqu_t* cmdq)
++{
++	int valid;
++	int mb_flags;
++	cmdqu_t *rtos_cmdqu_t;
++    	drv_spin_lock_irqsave(&mailbox_lock, mb_flags);
++	if (mb_flags == MAILBOX_LOCK_FAILED) 
++	{
++		uart_printf("cmdqu send error : ip_id=%d cmd_id=%d param_ptr=%x\n", cmdq->ip_id, cmdq->cmd_id, (unsigned int)cmdq->param_ptr);
++		return -EBUSY;
++	}
++    	rtos_cmdqu_t = (cmdqu_t*)(MBOX_BUFFER);
++	for (valid = 0; valid < MBOX_MAX_NUM; valid++) 
++	{
++		if (rtos_cmdqu_t->resv.valid.linux_valid == 0 && rtos_cmdqu_t->resv.valid.rtos_valid == 0) 
++		{
++        	    	uint8_t tmp_mbox_info;
++			// mailbox buffer context is int (4 bytes) access
++			int *ptr = (int *)rtos_cmdqu_t;
++			rtos_cmdqu_t->resv.valid.rtos_valid = 1;
++			*ptr = ((cmdq->ip_id << 0) | (cmdq->cmd_id << 8) | (cmdq->block << 15) |
++					(rtos_cmdqu_t->resv.valid.linux_valid << 16) |
++					(rtos_cmdqu_t->resv.valid.rtos_valid << 24));
++			rtos_cmdqu_t->param_ptr = cmdq->param_ptr;
++			// clear mailbox
++            sys_write8(BIT(valid), MBOX_INT_CLEAR(MBOX_TX_CPU));
++            tmp_mbox_info = sys_read8(MBOX_INT_ENABLE(MBOX_TX_CPU));
++            tmp_mbox_info |= BIT(valid);
++            sys_write8(tmp_mbox_info, MBOX_INT_ENABLE(MBOX_TX_CPU));
++            sys_write8(BIT(valid), MBOX_INT_TRIGER);;
++			break;
++		}
++		rtos_cmdqu_t++;
++	}
++
++	if (valid >= MBOX_MAX_NUM) 
++	{
++	    uart_printf("No valid mailbox is available\n");
++		drv_spin_unlock_irqrestore(&mailbox_lock, mb_flags);
++		return -EBUSY;
++	}
++	drv_spin_unlock_irqrestore(&mailbox_lock, mb_flags);
++    return 0;
++}
++
++void rtos_cmdqu_init(void)
++{
++    cvi_spinlock_init();
++    for(int i=0;i<MAX_CMD_NUM;i++)
++    {
++        g_cmd_handler[i] = NULL;
++        g_private_data[i] = NULL;
++    }
++    uart_printf("rtos_cmdqu_init done!\n");
++    return;
++}
++
++
++void cmdqu_intr(const struct device *dev)
++{
++	(void)dev;
++    	uint8_t set_val;
++	uint8_t valid_val;
++	uint8_t tmp_valid_val;
++	int i;
++	cmdqu_t *cmdq;
++	int flags;
++	
++	while(1)
++	{
++		drv_spin_lock_irqsave(&mailbox_lock, flags);
++		if(flags == MAILBOX_LOCK_FAILED)
++			continue;
++		break;
++	}
++	set_val = sys_read8(MBOX_INT_DONE(MBOX_RX_CPU));
++	int errno_mailbox[MBOX_MAX_NUM] = {0};
++	cmdqu_t err_cmdq[MBOX_MAX_NUM];
++	int erro_num = 0;
++	if (set_val) 
++	{
++		for(i = 0; i < MBOX_MAX_NUM && set_val > 0; i++) 
++		{
++			valid_val = set_val  & (1 << i);
++			if (valid_val) 
++			{
++				cmdqu_t rtos_cmdq;
++				cmdq = (cmdqu_t *)((cmdqu_t*)(MBOX_BUFFER) + i);
++
++				/* mailbox buffer context is send from linux, clear mailbox interrupt */
++				sys_write8(valid_val, MBOX_INT_CLEAR(MBOX_RX_CPU));
++                tmp_valid_val = sys_read8(MBOX_INT_ENABLE(MBOX_RX_CPU));
++				tmp_valid_val &= ~valid_val;
++				// need to disable enable bit
++				sys_write8(tmp_valid_val, MBOX_INT_ENABLE(MBOX_RX_CPU));
++				// copy cmdq context (8 bytes) to buffer ASAP
++				*((unsigned long *) &rtos_cmdq) = *((unsigned long *)cmdq);
++				/* need to clear mailbox interrupt before clear mailbox buffer */
++				*((unsigned long*) cmdq) = 0;
++				
++				set_val &= ~valid_val;
++
++				/* mailbox buffer context is send from linux*/
++				if (rtos_cmdq.resv.valid.linux_valid == 1) 
++				{
++					if(CMDID_INVALID(rtos_cmdq.cmd_id)) 
++					{
++						uart_printf("recieve a invalid cmd package!\n");
++						continue;
++					}
++
++					if(g_cmd_handler[rtos_cmdq.cmd_id - CMDQU_SEND_TEST] == NULL) 
++					{
++						uart_printf("a packeg cmd_id don't register %d\n",rtos_cmdq.cmd_id);
++						continue;
++					}
++					
++					int ret = g_cmd_handler[rtos_cmdq.cmd_id - CMDQU_SEND_TEST](&rtos_cmdq, g_private_data[rtos_cmdq.cmd_id - CMDQU_SEND_TEST]);
++					if(ret) 
++					{
++						errno_mailbox[i] = ret;
++						err_cmdq[i] = *cmdq;
++						erro_num++;
++					}
++				} 
++				else
++				{
++					uart_printf("rtos cmdq is not valid %d, ip=%d , cmd=%d\n",
++					rtos_cmdq.resv.valid.rtos_valid, rtos_cmdq.ip_id, rtos_cmdq.cmd_id);
++				}
++			}
++		}
++	}
++	drv_spin_unlock_irqrestore(&mailbox_lock, flags);
++	if(erro_num > 0) 
++	{
++		uart_printf("rtos irq_handler error! total amount: %d\n", erro_num);
++		for (i = 0; i < MBOX_MAX_NUM; i++) 
++		{
++			if(errno_mailbox[i] != 0) 
++			{
++				uart_printf("mailbox contex id %d errno %d\n", i, errno_mailbox[i]);
++				uart_printf("cmdq->ip_id =%d\n", err_cmdq[i].ip_id);
++				uart_printf("cmdq->cmd_id =%d\n", err_cmdq[i].cmd_id);
++				uart_printf("cmdq->param_ptr =%x\n", err_cmdq[i].param_ptr);
++				uart_printf("cmdq->block =%d\n", err_cmdq[i].block);
++				uart_printf("cmdq->linux_valid =%d\n", err_cmdq[i].resv.valid.linux_valid);
++				uart_printf("cmdq->rtos_valid =%x\n", err_cmdq[i].resv.valid.rtos_valid);
++			}
++		}
++	}
++}
++
+diff --git a/samples/mica/src/segment_test.c b/samples/mica/src/segment_test.c
+new file mode 100644
+index 0000000000..f8eda50c36
+--- /dev/null
++++ b/samples/mica/src/segment_test.c
+@@ -0,0 +1,40 @@
++#include "segment_test.h"
++#include <errno.h>
++static uint8_t data_test[10] = {0x34, 0x58, 0xff, 0xaf, 0xae, 0x1a, 0x6f, 0xef, 0x18, 0x43};
++
++#define BSS_TEST_AMOUNT  20
++static uint8_t bss_test[BSS_TEST_AMOUNT];
++
++
++int tst_data_segment(int* err, int* success)
++{
++	if(err == NULL || success == NULL)
++		return -EINVAL;
++	if(!(data_test[0] == 0x34 && data_test[1] == 0x58 && data_test[2] == 0xff && data_test[3] == 0xaf && data_test[4] == 0xae && data_test[5] == 0x1a && data_test[6] == 0x6f && data_test[7] == 0xef && data_test[8] == 0x18 && data_test[9] == 0x43) )
++	{
++		(*err)++;
++	}
++	else
++	{
++		(*success)++;
++	}
++	return 0;
++}
++
++int tst_bss_segment(int* err, int* success)
++{
++	if(err == NULL || success == NULL)
++		return -EINVAL;
++	for(int i=0; i<BSS_TEST_AMOUNT; i++)
++	{
++		if(bss_test[i] == 0)
++		{
++			(*success)++;
++		}
++		else
++		{
++			(*err)++;
++		}
++	}
++	return 0;
++}
+diff --git a/samples/mica/src/uart.c b/samples/mica/src/uart.c
+new file mode 100644
+index 0000000000..1a4f86e9ce
+--- /dev/null
++++ b/samples/mica/src/uart.c
+@@ -0,0 +1,68 @@
++#include "uart_printf.h"
++#include "hal_uart.h"
++#include <stdint.h>
++#include <string.h>
++#include <stdarg.h>
++#include <zephyr/types.h>
++
++
++void uart_init(void)
++{
++        int baudrate = 115200;
++        int uart_clock = 25 * 1000 * 1000;
++
++        /* set uart to pinmux_uart1 */
++        hal_uart_init(UART0, baudrate, uart_clock);
++        uart_printf("uart init done");
++}
++
++uint8_t uart_putc(uint8_t ch)
++{
++        if (ch == '\n') {
++                hal_uart_putc('\r');
++        }
++        hal_uart_putc(ch);
++        return ch;
++}
++
++
++
++int uart_put_buff(char *buf)
++{
++        int flags;
++        int count = 0;
++
++        while (buf[count]) {
++                if (uart_putc(buf[count]) != '\n') {
++                        count++;
++                } else { 
++                        break;
++            }
++        }
++        return count;
++}
++
++
++
++#define PRINT_BUFFER_SIZE 128
++int uart_printf(const char *fmt, ...)
++{
++        va_list args;
++        char buf[PRINT_BUFFER_SIZE];
++        int count;
++        int pos;
++        static int message_id = 1;
++        int msg_id_now;
++        msg_id_now = message_id++;
++        pos = snprintf(buf, sizeof(buf) - 1, "[Zephyr %d] :", msg_id_now);
++
++        va_start(args, fmt);
++        vsnprintf(buf + pos, sizeof(buf) - 1 - pos, fmt, args);
++        va_end(args);
++
++        /* Use putchar directly as 'puts()' adds a newline. */
++        buf[PRINT_BUFFER_SIZE - 1] = '\0';
++        count = uart_put_buff(buf);
++        return (count + pos);
++}
++
+diff --git a/soc/common/riscv-privileged/vector.S b/soc/common/riscv-privileged/vector.S
+index 4822fa5533..497a3e0f78 100644
+--- a/soc/common/riscv-privileged/vector.S
++++ b/soc/common/riscv-privileged/vector.S
+@@ -13,7 +13,7 @@ GTEXT(__start)
+ /* imports */
+ GTEXT(__initialize)
+ GTEXT(_isr_wrapper)
+-
++.extern g_mtvec_tmp
+ SECTION_FUNC(vectors, __start)
+ #if defined(CONFIG_RISCV_GP)
+ 	/* Initialize global pointer */
+@@ -22,7 +22,9 @@ SECTION_FUNC(vectors, __start)
+ 	la gp, __global_pointer$
+ 	.option pop
+ #endif
+-
++	la a1, g_mtvec_tmp
++        csrr a0, mtvec
++        sd a0, 0(a1)
+ 	.option norvc;
+ 
+ #if defined(CONFIG_RISCV_VECTORED_MODE)
+diff --git a/soc/sophgo/cv180x/Kconfig.defconfig b/soc/sophgo/cv180x/Kconfig.defconfig
+index 4fe580fd39..693f1548c7 100644
+--- a/soc/sophgo/cv180x/Kconfig.defconfig
++++ b/soc/sophgo/cv180x/Kconfig.defconfig
+@@ -22,4 +22,8 @@ config RISCV_HAS_PLIC
+ config 2ND_LVL_INTR_00_OFFSET
+ 	default 11
+ 
++config DYNAMIC_INTERRUPTS
++    bool
++    default y
++
+ endif # SOC_SERIES_CV180X
